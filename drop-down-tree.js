@@ -211,6 +211,9 @@ var DropDownTree = /** @class */ (function (_super) {
         this.isNodeSelected = false;
         this.isDynamicChange = false;
         this.clearIconWidth = 0;
+        // Cache for value assigned before dataSource is populated.
+        // Enables lifecycle-safe value <-> dataSource reconciliation.
+        this._pendingValue = null;
         this.headerTemplateId = "" + this.element.id + HEADERTEMPLATE;
         this.footerTemplateId = "" + this.element.id + FOOTERTEMPLATE;
         this.actionFailureTemplateId = "" + this.element.id + ACTIONFAILURETEMPLATE;
@@ -1448,6 +1451,15 @@ var DropDownTree = /** @class */ (function (_super) {
     };
     DropDownTree.prototype.setTreeValue = function () {
         if (this.value !== null && this.value.length !== 0) {
+            // Guard: When treeItems have not yet been populated (e.g. value was
+            // set before dataSource was assigned), cache the pending value and
+            // defer reconciliation to OnDataBound / syncValueWithData instead
+            // of silently splicing valid IDs away.
+            var dataReady = this.treeItems && this.treeItems.length > 0;
+            if (!dataReady) {
+                this._pendingValue = this.value.slice();
+                return;
+            }
             var data = void 0;
             if (this.showCheckBox || this.allowMultiSelection) {
                 for (var i = this.value.length - 1; i >= 0; i--) {
@@ -1459,18 +1471,67 @@ var DropDownTree = /** @class */ (function (_super) {
                 if (this.value.length !== 0) {
                     this.setValidValue();
                 }
+                this._pendingValue = null;
             }
             else {
                 data = this.treeObj.getTreeData(this.value[0])[0];
                 if (!isNOU(data)) {
                     this.setProperties({ text: data[this.fields.text] }, true);
                     this.setValidValue();
+                    this._pendingValue = null;
                 }
                 else {
                     this.setProperties({ value: this.currentValue }, true);
                 }
             }
         }
+    };
+    /**
+     * Unified Synchronization Guard for value <-> dataSource reconciliation.
+     * Re-applies a pre-assigned value once the tree data is available.
+     * Invoked from OnDataBound after treeItems have been populated so that
+     * selection works regardless of whether `value` or `fields.dataSource`
+     * is assigned first.
+     *
+     * @private
+     * @returns {void}
+     */
+    DropDownTree.prototype.syncValueWithData = function () {
+        // Guard: component must be initialized with a tree instance
+        if (isNOU(this.treeObj)) {
+            return;
+        }
+        // Guard: data must actually be present now
+        if (!this.treeItems || this.treeItems.length === 0) {
+            return;
+        }
+        // Resolve the value to re-apply: prefer the cached pending value
+        // (set when data was missing), otherwise fall back to the current value.
+        var valueToApply = null;
+        if (this._pendingValue && this._pendingValue.length > 0) {
+            valueToApply = this._pendingValue.slice();
+        }
+        else if (this.value && this.value.length > 0) {
+            valueToApply = this.value.slice();
+        }
+        if (!valueToApply || valueToApply.length === 0) {
+            return;
+        }
+        this._pendingValue = null;
+        // Restore value silently so downstream selection logic can match against
+        // the now-populated tree data.
+        this.setProperties({ value: valueToApply }, true);
+        // Re-run the original selection pipeline. setTreeValue will safely
+        // splice any IDs that genuinely do not exist in the new data (AC-5).
+        this.setTreeValue();
+        this.updateHiddenValue();
+        if (!this.wrapText) {
+            this.updateView();
+        }
+        // Keep oldValue in sync so subsequent change-tracking stays correct.
+        this.setOldValue();
+        this.currentValue = this.value;
+        this.currentText = this.text;
     };
     DropDownTree.prototype.setTreeText = function () {
         if (this.value !== null && !this.isInitialized) {
@@ -1952,6 +2013,18 @@ var DropDownTree = /** @class */ (function (_super) {
             }
             this.treeObj.element.focus();
             this.isInitialized = true;
+        }
+        // Lifecycle-safe reconciliation: if a value was assigned before the
+        // dataSource became available, re-apply it now that treeItems are
+        // populated. This makes value/dataSource assignment order-independent
+        // (covers async binding, late dataSource injection, empty -> populated
+        // transitions, and reassigned dataSource keeping valid selections).
+        // Only runs when there is a pending value cached by setTreeValue;
+        // the sync first-render path (handled by render()/setFields) is
+        // intentionally left unchanged to preserve existing behavior.
+        if (this._pendingValue && this._pendingValue.length > 0 &&
+            this.treeItems && this.treeItems.length > 0) {
+            this.syncValueWithData();
         }
         var eventArgs = { data: args.data };
         this.trigger('dataBound', eventArgs);
